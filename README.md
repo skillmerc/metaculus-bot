@@ -27,6 +27,13 @@ GitHub Actions in this repository:
 
 Secrets it needs (Settings, Secrets and variables, Actions): `METACULUS_TOKEN` and one model key such as `OPENROUTER_API_KEY`.
 
+## Settings (repository variables)
+
+- `BOT_LLM_MODEL`, `BOT_PARSER_MODEL`: model ids in litellm form, for example `openrouter/google/gemini-3.7-flash`.
+- `BOT_PREDICTIONS_PER_REPORT`: forecasts averaged per question (template default 5).
+- `BOT_MIN_BUDGET_USD`: spend guard. Before each question the bot reads the OpenRouter key's remaining limit and the account's credits (free API calls) and stops the run if the smaller one is under this amount (default 1). `off` disables it.
+- `BOT_DRY_RUN`: `true` builds every research and forecast prompt for the open questions without calling a model and without posting anything. Costs nothing. Use it with the Test Bot workflow.
+
 ## Status
 
 Set-up stage. The bot is not entered in any tournament yet.

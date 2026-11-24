@@ -46,6 +46,62 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+# ----------------------------------------------------------------------------
+# SKILLMERC additions: spend guard and dry run.
+# ----------------------------------------------------------------------------
+class DryRunPrompt(Exception):
+    """Raised instead of calling a model when BOT_DRY_RUN is on. Carries the prompt."""
+
+    def __init__(self, prompt: str):
+        super().__init__("dry run: prompt built, no model called")
+        self.prompt = prompt
+
+
+class BudgetGuardStop(Exception):
+    """Raised before a question when the OpenRouter key has too little budget left."""
+
+
+def _env_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def openrouter_budget_left_usd() -> float | None:
+    """
+    USD left on the OpenRouter key, from OpenRouter's own API (no model call, free).
+    Uses the key's limit_remaining when the key has a limit, and the account's
+    credits minus usage; returns the smaller one. None when neither can be read.
+    """
+    import json
+    import urllib.request
+
+    key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not key:
+        return None
+    found: list[float] = []
+    for url, reader in (
+        ("https://openrouter.ai/api/v1/key", lambda d: d.get("limit_remaining")),
+        (
+            "https://openrouter.ai/api/v1/credits",
+            lambda d: (
+                None
+                if d.get("total_credits") is None
+                else float(d["total_credits"]) - float(d.get("total_usage") or 0)
+            ),
+        ),
+    ):
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode()).get("data") or {}
+            value = reader(data)
+            if value is not None:
+                found.append(float(value))
+        except Exception as e:  # network or auth problem: treated as unknown
+            logger.warning(f"Budget check could not read {url}: {e.__class__.__name__}")
+    return min(found) if found else None
+
+
+
 class FallTemplateBot2026(ForecastBot):
     """
     This is the template bot for the Fall 2026 FutureEval Bot Tournament.
@@ -129,12 +185,38 @@ class FallTemplateBot2026(ForecastBot):
 
     ##################################### RESEARCH #####################################
 
+    dry_run: bool = False
+    budget_floor_usd: float | None = None
+    _budget_stopped: bool = False
+
+    def _check_budget_before_question(self, question: MetaculusQuestion) -> None:
+        """Spend guard: stop when the OpenRouter key has less than the floor left."""
+        if self.dry_run or self.budget_floor_usd is None:
+            return
+        if self._budget_stopped:
+            raise BudgetGuardStop("spend guard already tripped earlier in this run")
+        left = openrouter_budget_left_usd()
+        if left is None or left < self.budget_floor_usd:
+            self._budget_stopped = True
+            shown = "unknown" if left is None else f"{left:.2f}"
+            raise BudgetGuardStop(
+                f"spend guard: USD {shown} left on the OpenRouter key, floor is "
+                f"USD {self.budget_floor_usd:.2f}; not forecasting {question.page_url}"
+            )
+        logger.info(f"Spend guard: USD {left:.2f} left, floor {self.budget_floor_usd:.2f}, continuing")
+
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
+            self._check_budget_before_question(question)
             research = ""
             researcher = self.get_llm("researcher")
 
             prompt = self._get_research_prompt(question, researcher)
+            if self.dry_run:
+                logger.info(
+                    f"DRY RUN research prompt for {question.page_url}: {len(prompt)} characters"
+                )
+                return "(dry run: no research was done)"
 
             if isinstance(researcher, GeneralLlm):
                 research = await researcher.invoke(prompt)
@@ -236,6 +318,8 @@ class FallTemplateBot2026(ForecastBot):
         question: BinaryQuestion,
         prompt: str,
     ) -> ReasonedPrediction[float]:
+        if self.dry_run:
+            raise DryRunPrompt(prompt)
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
@@ -318,6 +402,8 @@ class FallTemplateBot2026(ForecastBot):
             {self._create_resolved_question_parsing_message()}
             """
         )
+        if self.dry_run:
+            raise DryRunPrompt(prompt)
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         predicted_option_list: PredictedOptionList = await structure_output(
@@ -401,6 +487,8 @@ class FallTemplateBot2026(ForecastBot):
         question: NumericQuestion,
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
+        if self.dry_run:
+            raise DryRunPrompt(prompt)
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
@@ -497,6 +585,8 @@ class FallTemplateBot2026(ForecastBot):
         question: DateQuestion,
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
+        if self.dry_run:
+            raise DryRunPrompt(prompt)
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
@@ -702,7 +792,8 @@ if __name__ == "__main__":
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
     check_environment(strict=True)
-    publish_to_metaculus = True
+    dry_run = _env_true("BOT_DRY_RUN")
+    publish_to_metaculus = not dry_run
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
     # Configure the bot. The `llms=` block below is commented out to use
@@ -766,6 +857,11 @@ if __name__ == "__main__":
         # },
     )
 
+    # SKILLMERC: dry run and spend guard settings (env vars, set as repo variables).
+    template_bot.dry_run = dry_run
+    floor_text = os.getenv("BOT_MIN_BUDGET_USD", "1").strip() or "1"
+    template_bot.budget_floor_usd = None if floor_text.lower() == "off" else float(floor_text)
+
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
     # whenever those rotate seasons.
@@ -779,6 +875,56 @@ if __name__ == "__main__":
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
     client = MetaculusClient()
+
+    if dry_run:
+        # Builds every research and forecast prompt for the open questions of
+        # this mode's tournament(s) without calling any model and without
+        # posting anything. Costs USD 0. Use with --mode test_questions.
+        dry_targets = {
+            "tournament": [client.CURRENT_AI_COMPETITION_ID, client.CURRENT_MINIBENCH_ID],
+            "metaculus_cup": [client.CURRENT_METACULUS_CUP_ID],
+            "test_questions": ["bot-testing-area"],
+        }[run_mode]
+        left = openrouter_budget_left_usd()
+        print(f"DRY RUN: spend guard reads USD {'unknown' if left is None else f'{left:.2f}'} left on the OpenRouter key")
+
+        async def _dry_run_one(question: MetaculusQuestion) -> str:
+            research = await template_bot.run_research(question)
+            if isinstance(question, ConditionalQuestion):
+                return "conditional question: research prompt only"
+            if isinstance(question, BinaryQuestion):
+                runner = template_bot._run_forecast_on_binary
+            elif isinstance(question, MultipleChoiceQuestion):
+                runner = template_bot._run_forecast_on_multiple_choice
+            elif isinstance(question, DateQuestion):
+                runner = template_bot._run_forecast_on_date
+            elif isinstance(question, NumericQuestion):
+                runner = template_bot._run_forecast_on_numeric
+            else:
+                return f"unsupported type {type(question).__name__}"
+            try:
+                await runner(question, research)
+            except DryRunPrompt as built:
+                return f"forecast prompt {len(built.prompt)} characters"
+            return "ERROR: forecast path did not stop at the model call"
+
+        dry_ok = True
+        for target in dry_targets:
+            questions = client.get_all_open_questions_from_tournament(target)
+            for question in questions:
+                skipped = template_bot.skip_previously_forecasted_questions and question.already_forecasted
+                if skipped:
+                    print(f"DRY RUN {question.page_url} [{type(question).__name__}]: already forecast, skipped")
+                    continue
+                try:
+                    result = asyncio.run(_dry_run_one(question))
+                except Exception as e:
+                    result = f"ERROR {e.__class__.__name__}: {e}"
+                if result.startswith("ERROR"):
+                    dry_ok = False
+                print(f"DRY RUN {question.page_url} [{type(question).__name__}]: {result}")
+        print("DRY RUN finished: no model was called and nothing was posted.")
+        raise SystemExit(0 if dry_ok else 1)
     if run_mode == "tournament":
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
