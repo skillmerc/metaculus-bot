@@ -32,9 +32,10 @@ Secrets it needs (Settings, Secrets and variables, Actions): `METACULUS_TOKEN` a
 - `BOT_LLM_MODEL`, `BOT_PARSER_MODEL`: model ids in litellm form, for example `openrouter/google/gemini-3.7-flash`.
 - `BOT_PREDICTIONS_PER_REPORT`: forecasts averaged per question (template default 5).
 - `BOT_MIN_BUDGET_USD`: spend guard. Before each question the bot reads the OpenRouter account balance (`/api/v1/credits`, credits minus usage; a free call) and stops the run if it is under this amount or cannot be read (default 1). `off` disables it.
+- `BOT_TOURNAMENTS`: which tournaments the "Forecast on new AI tournament questions" workflow enters, comma separated: `minibench` (the active MiniBench round), `seasonal` (the current FutureEval season) or a Metaculus slug or id. Default `minibench` only.
 - `BOT_MIN_SECONDS_BETWEEN_CALLS`: minimum gap between model calls (default 4, so at most 15 a minute). Calls go one at a time, questions one at a time, and an HTTP 429 waits for the provider's reset time before retrying (up to 6 times).
 - `BOT_DRY_RUN`: `true` builds every research and forecast prompt for the open questions without calling a model and without posting anything. Costs nothing. Use it with the Test Bot workflow.
 
 ## Status
 
-Set-up stage. The bot is not entered in any tournament yet.
+The bot enters MiniBench only (from 24 Nov 2026). It does not enter the seasonal tournament, the Metaculus Cup or Market Pulse.

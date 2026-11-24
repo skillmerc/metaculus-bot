@@ -929,12 +929,26 @@ if __name__ == "__main__":
     # summary printers below.
     client = MetaculusClient()
 
+    # SKILLMERC: which tournaments "tournament" mode enters, by the variable
+    # BOT_TOURNAMENTS (comma separated). "minibench" is the active MiniBench round,
+    # "seasonal" is the current FutureEval season; any other value is used as a
+    # Metaculus tournament slug or id. Default: minibench only.
+    tournament_aliases = {
+        "minibench": client.CURRENT_MINIBENCH_ID,
+        "seasonal": client.CURRENT_AI_COMPETITION_ID,
+    }
+    tournament_targets = [
+        tournament_aliases.get(name.strip().lower(), name.strip())
+        for name in (os.getenv("BOT_TOURNAMENTS", "").strip() or "minibench").split(",")
+        if name.strip()
+    ]
+
     if dry_run:
         # Builds every research and forecast prompt for the open questions of
         # this mode's tournament(s) without calling any model and without
         # posting anything. Costs USD 0. Use with --mode test_questions.
         dry_targets = {
-            "tournament": [client.CURRENT_AI_COMPETITION_ID, client.CURRENT_MINIBENCH_ID],
+            "tournament": tournament_targets,
             "metaculus_cup": [client.CURRENT_METACULUS_CUP_ID],
             "test_questions": ["bot-testing-area"],
         }[run_mode]
@@ -979,17 +993,13 @@ if __name__ == "__main__":
         print("DRY RUN finished: no model was called and nothing was posted.")
         raise SystemExit(0 if dry_ok else 1)
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+        # SKILLMERC: only the tournaments named in BOT_TOURNAMENTS (see above).
+        forecast_reports = []
+        for target in tournament_targets:
+            logger.info(f"Forecasting on tournament {target}")
+            forecast_reports += asyncio.run(
+                template_bot.forecast_on_tournament(target, return_exceptions=True)
             )
-        )
-        minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
-            )
-        )
-        forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
         # The Metaculus Cup may be uninitialized near the start of a season
         # (Jan/May/Sep). MetaculusClient.ACX_2025_TOURNAMENT = 32564 and

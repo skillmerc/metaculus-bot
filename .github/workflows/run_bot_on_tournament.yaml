@@ -50,3 +50,4 @@ jobs:
           BOT_DRY_RUN: ${{ vars.BOT_DRY_RUN }}
           BOT_MIN_BUDGET_USD: ${{ vars.BOT_MIN_BUDGET_USD }}
           BOT_MIN_SECONDS_BETWEEN_CALLS: ${{ vars.BOT_MIN_SECONDS_BETWEEN_CALLS }}
+          BOT_TOURNAMENTS: ${{ vars.BOT_TOURNAMENTS }}
