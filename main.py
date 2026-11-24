@@ -724,14 +724,24 @@ if __name__ == "__main__":
                     timeout=180,
                     allowed_tries=3,
                 ),
-                "summarizer": bot_parser_model,
+                "summarizer": GeneralLlm(
+                    model=bot_parser_model,
+                    temperature=0.3,
+                    timeout=180,
+                    allowed_tries=5,
+                ),
                 "researcher": GeneralLlm(
                     model=bot_llm_model,
                     temperature=0.3,
                     timeout=180,
                     allowed_tries=3,
                 ),
-                "parser": bot_parser_model,
+                "parser": GeneralLlm(
+                    model=bot_parser_model,
+                    temperature=0.3,
+                    timeout=180,
+                    allowed_tries=5,
+                ),
             }
         }
     template_bot = FallTemplateBot2026(
@@ -796,7 +806,9 @@ if __name__ == "__main__":
         # The bot-testing-area tournament contains all question types and is
         # the recommended target for smoke-testing your bot.
         # https://www.metaculus.com/tournament/bot-testing-area/
-        template_bot.skip_previously_forecasted_questions = False
+        # SKILLMERC: keep tournament discipline in the testing area too. Never
+        # re-forecast a question the bot already answered.
+        template_bot.skip_previously_forecasted_questions = True
         forecast_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 "bot-testing-area", return_exceptions=True
