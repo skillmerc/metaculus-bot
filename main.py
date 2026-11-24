@@ -67,9 +67,9 @@ def _env_true(name: str) -> bool:
 
 def openrouter_budget_left_usd() -> float | None:
     """
-    USD left on the OpenRouter key, from OpenRouter's own API (no model call, free).
-    Uses the key's limit_remaining when the key has a limit, and the account's
-    credits minus usage; returns the smaller one. None when neither can be read.
+    USD left on the OpenRouter ACCOUNT: GET /api/v1/credits, total_credits minus
+    total_usage (no model call, free). The key's own limit (limit_remaining) is not
+    money and is ignored. None when the balance cannot be read; the guard then stops.
     """
     import json
     import urllib.request
@@ -77,29 +77,77 @@ def openrouter_budget_left_usd() -> float | None:
     key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not key:
         return None
-    found: list[float] = []
-    for url, reader in (
-        ("https://openrouter.ai/api/v1/key", lambda d: d.get("limit_remaining")),
-        (
+    try:
+        req = urllib.request.Request(
             "https://openrouter.ai/api/v1/credits",
-            lambda d: (
-                None
-                if d.get("total_credits") is None
-                else float(d["total_credits"]) - float(d.get("total_usage") or 0)
-            ),
-        ),
-    ):
-        try:
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode()).get("data") or {}
-            value = reader(data)
-            if value is not None:
-                found.append(float(value))
-        except Exception as e:  # network or auth problem: treated as unknown
-            logger.warning(f"Budget check could not read {url}: {e.__class__.__name__}")
-    return min(found) if found else None
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode()).get("data") or {}
+        if data.get("total_credits") is None:
+            return None
+        return float(data["total_credits"]) - float(data.get("total_usage") or 0)
+    except Exception as e:  # network or auth problem: treated as unknown
+        logger.warning(f"Budget check could not read OpenRouter credits: {e.__class__.__name__}")
+        return None
 
+
+# Throttle every model call: at most one call at a time, at least
+# BOT_MIN_SECONDS_BETWEEN_CALLS seconds between call starts (default 4, so at most
+# 15 a minute, under OpenRouter's 20 a minute for new accounts), and on HTTP 429
+# wait until the X-RateLimit-Reset time (or back off) and try again.
+_MIN_SECONDS_BETWEEN_CALLS = float(os.getenv("BOT_MIN_SECONDS_BETWEEN_CALLS", "4").strip() or "4")
+_MAX_429_RETRIES = 6
+_call_state: dict[int, dict] = {}
+
+
+def _loop_state() -> dict:
+    loop_id = id(asyncio.get_running_loop())
+    if loop_id not in _call_state:
+        _call_state[loop_id] = {"lock": asyncio.Lock(), "last": 0.0, "question_lock": asyncio.Lock()}
+    return _call_state[loop_id]
+
+
+def _seconds_until_rate_limit_reset(error: Exception, attempt: int) -> float:
+    import re
+    import time
+
+    match = re.search(r"X-RateLimit-Reset\W+(\d{10,13})", str(error))
+    if match:
+        reset = int(match.group(1))
+        reset_seconds = reset / 1000 if reset > 10**11 else reset
+        wait = reset_seconds - time.time() + 1
+        if 0 < wait <= 120:
+            return wait
+    return min(60.0, 5.0 * (2**attempt))
+
+
+_original_call_litellm = GeneralLlm._call_litellm
+
+
+async def _throttled_call_litellm(self, prompt):  # type: ignore[no-untyped-def]
+    import time
+
+    import litellm
+
+    for attempt in range(_MAX_429_RETRIES + 1):
+        state = _loop_state()
+        async with state["lock"]:
+            gap = state["last"] + _MIN_SECONDS_BETWEEN_CALLS - time.monotonic()
+            if gap > 0:
+                await asyncio.sleep(gap)
+            state["last"] = time.monotonic()
+        try:
+            return await _original_call_litellm(self, prompt)
+        except litellm.RateLimitError as e:
+            if attempt == _MAX_429_RETRIES:
+                raise
+            wait = _seconds_until_rate_limit_reset(e, attempt)
+            logger.warning(f"HTTP 429 from the model provider; waiting {wait:.0f}s before retry {attempt + 1}")
+            await asyncio.sleep(wait)
+
+
+GeneralLlm._call_litellm = _throttled_call_litellm  # type: ignore[method-assign]
 
 
 class FallTemplateBot2026(ForecastBot):
@@ -183,6 +231,11 @@ class FallTemplateBot2026(ForecastBot):
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
 
+    async def _run_individual_question_with_error_propagation(self, question):  # type: ignore[no-untyped-def]
+        # SKILLMERC: finish one question (research and every forecast) before the next starts.
+        async with _loop_state()["question_lock"]:
+            return await super()._run_individual_question_with_error_propagation(question)
+
     ##################################### RESEARCH #####################################
 
     dry_run: bool = False
@@ -200,10 +253,10 @@ class FallTemplateBot2026(ForecastBot):
             self._budget_stopped = True
             shown = "unknown" if left is None else f"{left:.2f}"
             raise BudgetGuardStop(
-                f"spend guard: USD {shown} left on the OpenRouter key, floor is "
+                f"spend guard: USD {shown} left on the OpenRouter account, floor is "
                 f"USD {self.budget_floor_usd:.2f}; not forecasting {question.page_url}"
             )
-        logger.info(f"Spend guard: USD {left:.2f} left, floor {self.budget_floor_usd:.2f}, continuing")
+        logger.info(f"Spend guard: USD {left:.2f} left on the OpenRouter account, floor {self.budget_floor_usd:.2f}, continuing")
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
@@ -886,7 +939,7 @@ if __name__ == "__main__":
             "test_questions": ["bot-testing-area"],
         }[run_mode]
         left = openrouter_budget_left_usd()
-        print(f"DRY RUN: spend guard reads USD {'unknown' if left is None else f'{left:.2f}'} left on the OpenRouter key")
+        print(f"DRY RUN: spend guard reads USD {'unknown' if left is None else f'{left:.2f}'} left on the OpenRouter account")
 
         async def _dry_run_one(question: MetaculusQuestion) -> str:
             research = await template_bot.run_research(question)
