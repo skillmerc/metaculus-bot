@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -707,9 +708,36 @@ if __name__ == "__main__":
     # Configure the bot. The `llms=` block below is commented out to use
     # whichever default models forecasting-tools picks based on your env vars;
     # uncomment and edit to pin specific models.
+    # SKILLMERC: models can be set without code changes through the env vars
+    # BOT_LLM_MODEL (forecasts and research) and BOT_PARSER_MODEL (output parsing),
+    # for example "openrouter/google/gemma-4-31b-it:free". Unset means the template defaults.
+    # BOT_PREDICTIONS_PER_REPORT sets how many forecasts are averaged per question (default 5).
+    bot_llm_model = os.getenv("BOT_LLM_MODEL", "").strip()
+    bot_parser_model = os.getenv("BOT_PARSER_MODEL", "").strip() or bot_llm_model
+    custom_llms = {}
+    if bot_llm_model:
+        custom_llms = {
+            "llms": {
+                "default": GeneralLlm(
+                    model=bot_llm_model,
+                    temperature=0.3,
+                    timeout=180,
+                    allowed_tries=3,
+                ),
+                "summarizer": bot_parser_model,
+                "researcher": GeneralLlm(
+                    model=bot_llm_model,
+                    temperature=0.3,
+                    timeout=180,
+                    allowed_tries=3,
+                ),
+                "parser": bot_parser_model,
+            }
+        }
     template_bot = FallTemplateBot2026(
+        **custom_llms,
         research_reports_per_question=1,
-        predictions_per_research_report=5,
+        predictions_per_research_report=int(os.getenv("BOT_PREDICTIONS_PER_REPORT", "5") or "5"),
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=publish_to_metaculus,
         folder_to_save_reports_to=None,

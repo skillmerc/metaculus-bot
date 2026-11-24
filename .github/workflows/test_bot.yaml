@@ -40,3 +40,6 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          BOT_LLM_MODEL: ${{ vars.BOT_LLM_MODEL }}
+          BOT_PARSER_MODEL: ${{ vars.BOT_PARSER_MODEL }}
+          BOT_PREDICTIONS_PER_REPORT: ${{ vars.BOT_PREDICTIONS_PER_REPORT }}
